@@ -3338,8 +3338,13 @@ function catName(id){const c=CATS.find(x=>x.id===id);return c?c.name:id;}
 function questionById(id){return QUESTIONS.find(q=>q.id===id);}
 /* 저장에는 {id, your}만 있으므로, 화면에 보여줄 때 QUESTIONS에서 문제/정답/해설을 다시 찾아 채워요. */
 function wrongDisplayInfo(w){
-  const q=questionById(w.id);
-  if(!q) return {q:'(삭제되었거나 찾을 수 없는 문제예요)',your:w.your||'-',correct:'-',explain:'',cat:''};
+  let q=questionById(w.id);
+  if(!q && w.q){
+    // id(해시)가 안 맞아도 문제 본문 텍스트가 있으면 그걸로 다시 찾아봐요(예전 버전 기록 대비).
+    const key=normalizeQText(w.q);
+    q=QUESTIONS.find(x=>normalizeQText(x.q)===key);
+  }
+  if(!q) return {q:w.q||'(삭제되었거나 찾을 수 없는 문제예요)',your:w.your||'-',correct:w.correct||'-',explain:'',cat:''};
   return {q:q.q, your:(w.your===null||w.your===undefined||w.your==='')?'(제출 안함)':w.your,
     correct:q.t==='mcq'?q.o[q.a]:q.a, explain:q.e, cat:q.c};
 }
@@ -3660,12 +3665,21 @@ function matchQuestionsForWrong(wn){
   });
   const byText={};
   QUESTIONS.forEach(q=>{ const key=normalizeQText(q.q); if(byText[key]===undefined) byText[key]=q; });
+  const seenInputIds=new Set();
+  const unmatched=[];
   wn.forEach(w=>{
-    if(!w.q) return;
-    const q=byText[normalizeQText(w.q)];
-    if(q && !matchedIds.has(q.id)){ matched.push(q); matchedIds.add(q.id); }
+    if(seenInputIds.has(w.id)) return;
+    seenInputIds.add(w.id);
+    if(w.q){
+      const q=byText[normalizeQText(w.q)];
+      if(q){ if(!matchedIds.has(q.id)){ matched.push(q); matchedIds.add(q.id); } return; }
+    }
+    if(!ids.includes(w.id) || !matchedIds.has(w.id)){
+      // 이 wn 항목의 id도, 본문 텍스트도 지금 QUESTIONS에서 짝을 못 찾은 경우
+      if(!matched.some(m=>m.id===w.id)) unmatched.push(w);
+    }
   });
-  return matched;
+  return {matched, unmatched};
 }
 async function loadWrongPoolAndStart(){
   const {data:sd, failed}=await getStudentData(state.name);
@@ -3708,14 +3722,19 @@ async function loadWrongPoolAndStart(){
       return;
     }
   }
-  let list=matchQuestionsForWrong(wn);
+  const result=matchQuestionsForWrong(wn);
+  let list=result.matched;
   if(list.length===0){
     await showAlert('오답 기록은 있지만, 지금 문제은행에서 같은 문제를 찾지 못했어요. 문제 내용이 크게 바뀌었을 수 있어요.');
     return;
   }
   const totalWrongCount=[...new Set(wn.map(w=>w.id))].length;
   if(list.length<totalWrongCount){
-    await showAlert(`오답 기록 ${totalWrongCount}개 중 ${list.length}개를 지금 문제집에서 찾았어요. 나머지 ${totalWrongCount-list.length}개는 문제 내용이 많이 바뀌어서 자동으로 찾지 못했어요.`);
+    const preview=result.unmatched.slice(0,3).map(w=>{
+      const t=(w.q||'').replace(/\s+/g,' ').trim();
+      return t ? `· ${t.slice(0,40)}${t.length>40?'…':''}` : '· (문제 본문 정보가 없는 아주 예전 기록)';
+    }).join('\n');
+    await showAlert(`오답 기록 ${totalWrongCount}개 중 ${list.length}개를 지금 문제집에서 찾았어요. 나머지 ${totalWrongCount-list.length}개는 문제 내용이 많이 바뀌어서 자동으로 찾지 못했어요.\n\n못 찾은 문제:\n${preview}`);
   }
   list=shuffle(list);
   beginList(list);
@@ -4399,7 +4418,23 @@ async function showWrongHistoryScreen(){
     document.getElementById('backHomeBtn').onclick=()=>{screen='setup';render();};
     return;
   }
-  const logs=(sd.examLogs||[]).slice().reverse();
+  const cloud=await fetchCloudWrongData(state.name);
+  /* 구글시트에 기록이 있으면(다른 기기·예전 버전 앱 포함) 그걸 기준으로 보여주고,
+     없으면(GAS_URL 미설정 등) 이 기기에만 저장된 기록으로 대체해요. */
+  let logs;
+  if(cloud.sessions && cloud.sessions.length){
+    logs=cloud.sessions.slice().sort((a,b)=>new Date(b.ts)-new Date(a.ts)).map(s=>({
+      id:s.sessionId,
+      ts:new Date(s.ts).getTime(),
+      mode:s.mode||'full',
+      score:s.score||0,
+      cats:(s.cats&&s.cats.length)?s.cats.map(catName).join(','):'전체',
+      wrongList:(s.detail&&s.detail.length)?s.detail.filter(d=>d.ok===false).map(d=>({id:d.id,your:d.your,q:d.q,correct:d.correct})):(s.wrongIds||[]).map(id=>({id})),
+      complete:!!s.finished
+    }));
+  } else {
+    logs=(sd.examLogs||[]).slice().reverse();
+  }
   const totalWrong=logs.reduce((s,l)=>s+((l.wrongList&&l.wrongList.length)||0),0);
   app.innerHTML=`
   <div class="card">
