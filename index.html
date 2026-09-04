@@ -3271,6 +3271,21 @@ async function loadNameFromStorage(){
   }catch(e){/* 저장된 이름이 없으면 빈 값으로 진행 */}
   return '';
 }
+/* 로그아웃: 기억해 둔 이름을 지우고 로그인 화면으로 돌아가요. 같은 기기를 여러 학생이
+   함께 쓸 때, 다음 학생 화면에 이전 학생 이름이 남아있지 않도록 해요. */
+async function logout(){
+  const ok=await showConfirm('로그아웃할까요? 로그인 화면으로 돌아가요.');
+  if(!ok) return;
+  try{ localStorage.removeItem(LS_PREFIX+NAME_KEY); }catch(e){}
+  state.name='';
+  state.cats=[];
+  state.mode='full';
+  state.wrongScope='all';
+  state.hasResume=false;
+  state.resumeInfo=null;
+  screen='login';
+  render();
+}
 function sset(key,val,retries=4){
   try{
     localStorage.setItem(LS_PREFIX+key, JSON.stringify(val));
@@ -3495,6 +3510,7 @@ function renderSetup(){
     </div>
     <button class="btn btn-outline" id="wrongHistoryBtn" style="margin-top:10px;">📚 내 오답노트 모아보기 (PDF·인쇄)</button>
     <button class="btn btn-outline" id="teacherBtn" style="margin-top:10px;">📋 강사용 결과 보기</button>
+    <button class="btn btn-outline" id="logoutBtn" style="margin-top:10px;">🚪 로그아웃</button>
     <div class="giveup" id="resetMyDataBtn" style="margin-top:14px;">🧹 내 오답노트·포인트 초기화</div>
     <div class="giveup" id="storageTestBtn" style="margin-top:6px;">🔧 저장 기능 테스트 (오답모드가 안 될 때 눌러보세요)</div>
   </div>
@@ -3567,7 +3583,9 @@ async function fetchCloudWrongData(name){
   /* 구글시트에 기록된 이 학생의 모든 응시 회차(다른 기기 포함)를 가져와,
      시간순으로 마지막 결과가 정답이면 오답 목록에서 빼는 방식으로
      '지금 시점 기준 진짜 오답'만 골라내요. GAS_URL이 없거나 네트워크에
-     실패하면 조용히 빈 결과를 돌려주고, 로컬 기록만으로 이어서 동작해요. */
+     실패하면 조용히 빈 결과를 돌려주고, 로컬 기록만으로 이어서 동작해요.
+     q(문제 본문)도 함께 보관해서, 이후 문제은행이 업데이트되어 id(해시)가 달라지더라도
+     본문 텍스트로 다시 찾아낼 수 있게 해요(예전 버전 앱으로 풀었던 오답 기록 복구용). */
   if(!GAS_URL) return {wrongList:[], sessions:[]};
   try{
     const res=await fetch(`${GAS_URL}?action=detail&name=${encodeURIComponent(name)}&app=${encodeURIComponent(APP_LABEL)}`);
@@ -3578,7 +3596,7 @@ async function fetchCloudWrongData(name){
     const wrongMap={};
     byTimeAsc.forEach(s=>{
       (s.detail||[]).forEach(d=>{
-        if(d.ok===false) wrongMap[d.id]={id:d.id, your:d.your};
+        if(d.ok===false) wrongMap[d.id]={id:d.id, your:d.your, q:d.q, correct:d.correct};
         else delete wrongMap[d.id];
       });
     });
@@ -3616,6 +3634,27 @@ async function fetchCloudResume(name){
     return null;
   }
 }
+/* wn(오답 후보 목록: 각 항목은 {id, your, q?})을 지금 문제은행(QUESTIONS)과 매칭해서
+   실제로 풀 수 있는 문제 배열로 바꿔줘요.
+   1) 먼저 id(해시)가 그대로 일치하는 문제를 찾고,
+   2) id가 안 맞는 나머지는(문제은행이 업데이트되면서 해시가 바뀐 경우) 저장돼 있던
+      문제 본문(q) 텍스트로 다시 찾아서 구제해요 → 예전 버전 앱에서 쌓인 오답도 최대한 살려서 써요. */
+function matchQuestionsForWrong(wn){
+  const ids=[...new Set(wn.map(w=>w.id))];
+  const matched=[];
+  const matchedIds=new Set();
+  QUESTIONS.forEach(q=>{
+    if(ids.includes(q.id) && !matchedIds.has(q.id)){ matched.push(q); matchedIds.add(q.id); }
+  });
+  const byText={};
+  QUESTIONS.forEach(q=>{ if(byText[q.q]===undefined) byText[q.q]=q; });
+  wn.forEach(w=>{
+    if(!w.q) return;
+    const q=byText[w.q];
+    if(q && !matchedIds.has(q.id)){ matched.push(q); matchedIds.add(q.id); }
+  });
+  return matched;
+}
 async function loadWrongPoolAndStart(){
   const {data:sd, failed}=await getStudentData(state.name);
   if(failed){
@@ -3638,13 +3677,13 @@ async function loadWrongPoolAndStart(){
     }
     if(cloudTs>localTs){
       // 다른 기기에서 본 시험이 이 기기의 기록보다 더 최근이면 그쪽을 최근 시험으로 봐요.
-      wn=(cloudLast.detail||[]).filter(d=>d.ok===false).map(d=>({id:d.id, your:d.your}));
+      wn=(cloudLast.detail||[]).filter(d=>d.ok===false).map(d=>({id:d.id, your:d.your, q:d.q}));
     } else {
       wn=localLast.wrongList||[];
     }
     if(wn.length===0){showAlert('가장 최근 시험에서는 틀린 문제가 없었어요! 완벽했네요 🎉');return;}
   } else {
-    // sd.wrong(현재 미해결 오답) + 모든 로컬 시험 기록의 오답 + 구글시트(다른 기기 포함)의 오답을 모두 합쳐요.
+    // sd.wrong(현재 미해결 오답) + 모든 로컬 시험 기록의 오답 + 구글시트(다른 기기 포함, 예전 버전 앱 포함)의 오답을 모두 합쳐요.
     const fromLogs=[];
     (sd.examLogs||[]).forEach(l=>{(l.wrongList||[]).forEach(w=>fromLogs.push(w));});
     wn=[...(sd.wrong||[]), ...fromLogs, ...cloud.wrongList];
@@ -3657,8 +3696,11 @@ async function loadWrongPoolAndStart(){
       return;
     }
   }
-  const ids=[...new Set(wn.map(w=>w.id))];
-  let list=QUESTIONS.filter(q=>ids.includes(q.id));
+  let list=matchQuestionsForWrong(wn);
+  if(list.length===0){
+    await showAlert('오답 기록은 있지만, 지금 문제은행에서 같은 문제를 찾지 못했어요. 문제 내용이 크게 바뀌었을 수 있어요.');
+    return;
+  }
   list=shuffle(list);
   beginList(list);
 }
@@ -4914,6 +4956,7 @@ function bindEvents(){
     document.getElementById('hofBtn').onclick=()=>{showHOFScreen();};
     document.getElementById('wrongHistoryBtn').onclick=()=>{showWrongHistoryScreen();};
     document.getElementById('teacherBtn').onclick=()=>{screen='tlogin';render();};
+    document.getElementById('logoutBtn').onclick=()=>{logout();};
     document.getElementById('resetMyDataBtn').onclick=async()=>{
       const nameEl=document.getElementById('nameInput');
       const nm=(nameEl?nameEl.value:state.name).trim();
