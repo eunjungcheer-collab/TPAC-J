@@ -4494,11 +4494,35 @@ function showWrongHistoryDetail(title,items,mode){
       <div style="font-size:12.5px;color:var(--sub);margin-top:4px;">${w.explain}</div></div>`;
     }).join('')}
   </div>
-  <button class="btn btn-primary" id="pdfBtn2">📄 오답노트 PDF 만들기 (저장·인쇄)</button>
+  ${items.length>0?'<button class="btn btn-primary" id="retryTheseBtn" style="margin-top:6px;">🔁 이 문제들 다시 풀기</button>':''}
+  <button class="btn btn-primary" id="pdfBtn2" style="margin-top:6px;">📄 오답노트 PDF 만들기 (저장·인쇄)</button>
   <button class="btn btn-ghost" id="backHistBtn" style="margin-top:10px;">목록으로 돌아가기</button>
   `;
   document.getElementById('pdfBtn2').onclick=()=>generateWrongNotePDF();
   document.getElementById('backHistBtn').onclick=()=>showWrongHistoryScreen();
+  const retryBtn=document.getElementById('retryTheseBtn');
+  if(retryBtn) retryBtn.onclick=()=>retryWrongItems(items);
+}
+/* 나중에 다시 맞혔는지와 무관하게, 특정 회차(또는 모아보기 화면)에서 보고 있는
+   문제들을 '그대로' 다시 풀어볼 수 있게 해요. id가 안 맞아도 본문 텍스트로 찾아서
+   최대한 구제해요(matchQuestionsForWrong과 동일한 로직). */
+async function retryWrongItems(items){
+  const wn=items.map(raw=>{
+    const w=wrongDisplayInfo(raw);
+    return {id:raw.id, your:raw.your, q:w.q};
+  });
+  const result=matchQuestionsForWrong(wn);
+  let list=result.matched;
+  if(list.length===0){
+    await showAlert('이 문제들을 지금 문제집에서 찾지 못했어요. 문제 내용이 많이 바뀌었을 수 있어요.');
+    return;
+  }
+  const totalCount=[...new Set(wn.map(w=>w.id))].length;
+  if(list.length<totalCount){
+    await showAlert(`${totalCount}개 중 ${list.length}개를 찾았어요. 나머지 ${totalCount-list.length}개는 문제 내용이 많이 바뀌어서 자동으로 찾지 못했어요.`);
+  }
+  list=shuffle(list);
+  beginList(list);
 }
 
 /* ============ COUPON / HOF (self) ============ */
